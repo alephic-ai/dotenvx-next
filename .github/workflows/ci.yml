@@ -1,0 +1,148 @@
+name: CI
+
+# `pull_request` covers branch and fork PRs; `push` is limited to main so
+# those pushes don't also run CI as a push. PR merges emit a `push` on main,
+# which gates and triggers the release job — don't remove it.
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - run: pnpm ci
+      - run: pnpm prettier --check .
+      - run: pnpm tsc6
+      - run: pnpm eslint .
+      - run: pnpm test
+
+  # Publishing runs only after the full CI gate passes on main — no release
+  # PR: changesets are AI-generated from the merged commits (`ax changeset
+  # generate`), then version + publish + push happen in this one run. npmjs
+  # trusted publishing is bound to this workflow file (ci.yml).
+  release:
+    needs: ci
+    # Push-gated: `pull_request` runs (fork PRs included) never reach this
+    # job, so the app private key and ANTHROPIC_API_KEY are never exposed to
+    # unreviewed code — on a public repo this gate is the security boundary.
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    # One release at a time; a queued release is replaced by a newer one, a
+    # running publish is never cancelled.
+    concurrency: release-${{ github.ref }}
+    permissions:
+      contents: read # checkout; the push uses the app token instead
+      id-token: write # npmjs trusted publishing (OIDC)
+    env:
+      # Once `changeset version` bumps package.json mid-job, pnpm 11's
+      # verify-deps-before-run sees the drift and prepends a redundant
+      # `pnpm install` to any later `pnpm *` command. Dependencies are
+      # installed explicitly in this job, so skip the check.
+      PNPM_CONFIG_VERIFY_DEPS_BEFORE_RUN: 'false'
+    steps:
+      # The org ruleset on main only lets the alephic-bot app push directly
+      # (GITHUB_TOKEN pushes are rejected). The same token downloads the `ax`
+      # binary from the private alephic-ai/tools releases, hence
+      # `repositories` lists both repos.
+      - uses: actions/create-github-app-token@v3
+        id: app-token
+        with:
+          app-id: ${{ vars.ALEPHIC_BOT_APP_ID }}
+          private-key: ${{ secrets.ALEPHIC_BOT_SECRET }}
+          owner: alephic-ai
+          repositories: dotenvx-next,tools
+      - name: Get GitHub App user ID
+        id: get-user-id
+        run:
+          echo "user-id=$(gh api "/users/${{ steps.app-token.outputs.app-slug
+          }}[bot]" --jq .id)" >> "$GITHUB_OUTPUT"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Configure Git
+        run: |
+          git config --global user.name '${{ steps.app-token.outputs.app-slug }}[bot]'
+          git config --global user.email '${{ steps.get-user-id.outputs.user-id }}+${{ steps.app-token.outputs.app-slug }}[bot]@users.noreply.github.com'
+      # Full history + tags: `ax changeset generate` reads the commits since
+      # the last release tag (its --base below). The app token is persisted
+      # in the remote URL so the final push goes out as alephic-bot[bot].
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
+        with:
+          node-version-file: package.json
+          cache: pnpm
+      - name: Upgrade npm # npm >= 11.5.1 is required for trusted publishing (OIDC) to npmjs.
+        run: npm install -g npm@latest
+      - run: pnpm ci
+      # `ax` isn't on npm; it ships as self-contained binaries on the private
+      # alephic-ai/tools releases (no tag argument = latest release).
+      # Download outside the repo so nothing untracked sits near the
+      # release commit.
+      - name: Download ax
+        run: |
+          gh release download --repo alephic-ai/tools --pattern ax-linux-x64 --dir "$RUNNER_TEMP"
+          chmod +x "$RUNNER_TEMP/ax-linux-x64"
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+      - name: Generate changesets
+        run: |
+          # Base = last release tag: it always exists (v0.1.0+), unlike the
+          # `RELEASING:` commit ax's default base detection looks for (this
+          # history's older releases are "chore: release" commits), and a
+          # tag marks an actual publish — so the range is exactly the
+          # unreleased commits. On the re-run triggered by the RELEASING
+          # push, HEAD is the tagged commit, the range is empty, and nothing
+          # is generated.
+          "$RUNNER_TEMP/ax-linux-x64" changeset generate --base "$(git describe --tags --abbrev=0 2>/dev/null || git rev-list --max-parents=0 HEAD)"
+
+          # Stage the generated changesets: `changeset version` (commit: true)
+          # runs `git add` on each changeset file after deleting it, which
+          # prints "fatal: pathspec did not match any files" unless the file
+          # is in the index. Staged add + staged delete cancel out, so the
+          # files never appear in the release commit. A directory pathspec
+          # (not a glob) so the add is a no-op instead of an error when no
+          # changesets were generated.
+          git add --all .changeset
+        env:
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          # Skip the binary's self-update check — it needs gh auth to
+          # alephic-ai/tools, and this download is already the latest.
+          AX_NO_SELF_UPDATE: '1'
+      # One step so a failure anywhere stops before `git push`: origin/main
+      # is only touched after a successful publish, never left with consumed
+      # changesets and no npm release. The push uses the app token, which
+      # (unlike GITHUB_TOKEN) does trigger workflows — the RELEASING commit
+      # re-runs CI and this job, which then no-ops cleanly.
+      - name: Version, publish and push
+        run: |
+          pnpm changeset version
+
+          pnpm build
+
+          # Publishing is irreversible; if main moved since checkout, the
+          # push below would be rejected and npm left ahead of the repo.
+          # Abort before publish instead — the release run queued by that
+          # newer push releases these commits.
+          git fetch origin main
+          git merge-base --is-ancestor FETCH_HEAD HEAD
+
+          pnpm changeset publish
+          git push --follow-tags
+        env:
+          # @changesets/changelog-github reads PR/author info during
+          # `changeset version`.
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
