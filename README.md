@@ -89,6 +89,11 @@ Then `dev`, `build` and `start` no longer need a dotenvx CLI wrapper. Keep
 `dotenvx run -- …` for tools that don't go through Next (`drizzle-kit`,
 `vitest`, scripts).
 
+`loadEnv()` is a no-op when `NODE_ENV` is `test`, so importing `env.ts` from a
+test never decrypts `dotenv/` with whatever private key the machine has. Seed
+the test env explicitly (a vitest `setupFiles` entry), or run the test command
+under `dotenvx run -- …` when it needs real values.
+
 ## How it works
 
 - `withDotenvx()` calls `loadEnv()` while `next.config.ts` is evaluated — in the
@@ -105,6 +110,8 @@ Then `dev`, `build` and `start` no longer need a dotenvx CLI wrapper. Keep
   (`[MISSING_ENV_FILE]`, `[DECRYPTION_FAILED]`) on the first request. Without it
   — no `dotenv/` yet, CI without keys, `next typegen` on a fresh clone — missing
   files are skipped, decrypt errors are logged, execution continues.
+- Under `NODE_ENV=test` nothing is read at all. Next never sets that value; only
+  a test runner does.
 
 Not for `proxy.ts`/middleware or edge routes: Next does not apply
 `outputFileTracingIncludes` to the proxy trace (verified with Turbopack, Next

@@ -18,10 +18,15 @@ const DOTENV_DIR = 'dotenv'
  * into the app. Elsewhere — a repo without `dotenv/` yet, CI without keys,
  * `next typegen` on a fresh clone — missing files are skipped and decrypt
  * errors are logged, as the dotenvx CLI does. `NODE_ENV` is deliberately not
- * the switch: every Next command except `dev` sets it to `production`,
- * including `typegen`.
+ * the deployed switch: every Next command except `dev` sets it to
+ * `production`, including `typegen`.
+ *
+ * Under a test runner (`NODE_ENV=test`, which Next itself never sets) this is
+ * a no-op: tests seed their env explicitly or run under `dotenvx run`, never
+ * decrypt the real files with whatever private key the machine has.
  */
 export function loadEnv() {
+  if (process.env.NODE_ENV === 'test') return
   const vercelEnv = process.env.VERCEL_ENV
   const deployed = Boolean(vercelEnv)
   const base = `${DOTENV_DIR}/.env`
