@@ -1,6 +1,6 @@
 {
   "name": "@alephic/dotenvx-next",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Decrypt dotenvx env files at runtime in Next.js apps, with no generated .env file",
   "keywords": [
     "dotenvx",
