@@ -1,7 +1,7 @@
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, describe, expect, it } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { loadEnv, withDotenvx } from './index.ts'
 
@@ -25,9 +25,12 @@ beforeEach(() => {
     saved[key] = process.env[key]
     delete process.env[key]
   }
+  // vitest sets NODE_ENV=test, which makes loadEnv() a no-op.
+  vi.stubEnv('NODE_ENV', 'development')
 })
 
 afterEach(() => {
+  vi.unstubAllEnvs()
   process.chdir(originalCwd)
   rmSync(dir, { force: true, recursive: true })
   for (const key of KEYS) {
@@ -77,6 +80,13 @@ describe('loadEnv', () => {
 
   it('skips a missing base file when not deployed', () => {
     expect(() => loadEnv()).not.toThrow()
+  })
+
+  it('is a no-op under a test runner (NODE_ENV=test)', () => {
+    vi.stubEnv('NODE_ENV', 'test')
+    writeEnv('.env', 'FOO=base\n')
+    loadEnv()
+    expect(process.env.FOO).toBeUndefined()
   })
 
   it('throws on a missing base file when deployed', () => {
