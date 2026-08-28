@@ -1,5 +1,5 @@
 ---
-'@alephic/dotenvx-next': fix
+'@alephic/dotenvx-next': patch
 ---
 
 `loadEnv()` is now a no-op when `NODE_ENV` is `test`. Importing `env.ts` from
